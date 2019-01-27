@@ -5,4 +5,4 @@ This repository contains:
 
 (1) PowerPoint deck summarizing the project / results
 
-(2) R script with forecasting models
+(2) R & Python scripts with forecasting models
