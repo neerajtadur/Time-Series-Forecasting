@@ -1,0 +1,366 @@
+---
+title: "Time_series_Project_Final"
+author: "Neeraj Tadur"
+date: "12/12/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Import libraries
+```{r }
+library(ggplot2)
+library(lubridate)
+library(reshape2)
+library(zoo)
+library(mctest)
+library(tidyverse)
+require(data.table)
+library(TSA)
+library(timeSeries)
+library(xts)
+library(forecast)
+library(plyr)
+library(dplyr)
+library(imputeTS)
+library(segmented)
+library(TSPred)
+library(tseries)
+```
+
+## Data Pre processing- Combining Comed electric consumption data and chicago weather data
+
+```{r pressure, echo=FALSE}
+comed_hourly <- read.csv('/Users/neerajtadur/Downloads/COMED_hourly.csv', header=TRUE)
+comed_hourly$Datetime <-  as.POSIXct(comed_hourly$Datetime,format ='%Y-%m-%d %H:%M:%S')
+
+comed_hourly <- comed_hourly %>% 
+  map(na.locf)
+
+comed_hourly <- as.data.frame(comed_hourly)
+
+comed_hourly <- comed_hourly[comed_hourly$Datetime >= '2013-01-01 00:00:00' & comed_hourly$Datetime <= '2017-01-31 23:00:00',]
+
+comed_daily <- comed_hourly
+comed_daily <- comed_daily %>% mutate(Date = as.Date(Datetime))
+comed_daily[,'Datetime'] <- list(NULL)
+
+comed_daily <- comed_daily %>% group_by(Date) %>% dplyr::summarise(day_comsump = sum(COMED_MW))
+
+
+```
+
+#Pre processing weather data
+```{r}
+datapath <- "/Users/neerajtadur/Downloads/historical-hourly-weather-data"
+
+df_hum<-
+  read.csv(file=paste(datapath,"humidity.csv",sep="/"),
+           row.names=NULL,header=TRUE,sep=",")
+df_hum<- df_hum[,c('datetime','Chicago')]
+
+df_hum$datetime <- as.POSIXct(df_hum$datetime,format="%Y-%m-%d %H:%M:%S")
+
+df_hum <- subset(df_hum, df_hum$datetime >= "2013-01-01 00:00:00" & df_hum$datetime <= "2017-01-31 23:00:00") 
+
+colnames(df_hum)<-c('Date','Humidity')                  
+
+df_pre<-
+  read.csv(file=paste(datapath,"pressure.csv",sep="/"),
+           row.names=NULL,header=TRUE,sep=",")
+
+df_pre<- df_pre[,c('datetime','Chicago')]
+
+df_pre$datetime <- as.POSIXct(df_pre$datetime,format="%Y-%m-%d %H:%M:%S")
+
+df_pre <- subset(df_pre, df_pre$datetime >= "2013-01-01 00:00:00" & df_pre$datetime <= "2017-01-31 23:00:00") 
+
+colnames(df_pre)<-c('Date','Pressure')  
+
+df_temp<-
+  read.csv(file=paste(datapath,"temperature.csv",sep="/"),
+           row.names=NULL,header=TRUE,sep=",")
+
+df_temp<- df_temp[,c('datetime','Chicago')]
+
+df_temp$datetime <- as.POSIXct(df_temp$datetime,format="%Y-%m-%d %H:%M:%S")
+
+df_temp <- subset(df_temp, df_temp$datetime >= "2013-01-01 00:00:00" & df_temp$datetime <= "2017-01-31 23:00:00") 
+
+colnames(df_temp)<-c('Date','Temperature')  
+
+
+df_wind_d<-
+  read.csv(file=paste(datapath,"wind_direction.csv",sep="/"),
+           row.names=NULL,header=TRUE,sep=",")
+
+df_wind_d<- df_wind_d[,c('datetime','Chicago')]
+
+df_wind_d$datetime <- as.POSIXct(df_wind_d$datetime,format="%Y-%m-%d %H:%M:%S")
+
+df_wind_d <- subset(df_wind_d, df_wind_d$datetime >= "2013-01-01 00:00:00" & df_wind_d$datetime <= "2017-01-31 23:00:00") 
+
+colnames(df_wind_d)<-c('Date','Wind_Direction') 
+
+df_wind_s<-
+  read.csv(file=paste(datapath,"wind_speed.csv",sep="/"),
+           row.names=NULL,header=TRUE,sep=",")
+
+df_wind_s<- df_wind_s[,c('datetime','Chicago')]
+
+df_wind_s$datetime <- as.POSIXct(df_wind_s$datetime,format="%Y-%m-%d %H:%M:%S")
+
+df_wind_s <- subset(df_wind_s, df_wind_s$datetime >= "2013-01-01 00:00:00" & df_wind_s$datetime <= "2017-01-31 23:00:00") 
+
+colnames(df_wind_s)<-c('Date','Wind_Speed') 
+
+df_weather_main<-join_all(list(df_hum,df_pre,df_temp,df_wind_d,df_wind_s), by='Date', type='full')
+
+Humidity1<-na.kalman(df_hum$Humidity)
+Humidity1<-as.vector(Humidity1)
+
+Pressure1<-na.kalman(df_pre$Pressure)
+Pressure1<-as.vector(Pressure1)
+
+Temperature1<-na.kalman(df_temp$Temperature)
+Temperature1<-as.vector(Temperature1)
+
+
+df_weather_main <- cbind(df_weather_main,Humidity1,Pressure1,Temperature1)
+
+df_weather_main[,c('Humidity','Pressure','Temperature')] <- list(NULL)
+
+sapply(df_weather_main, function(x) sum(is.na(x)))
+
+df_weather_main <- df_weather_main %>% mutate(Date=as.Date(Date))
+
+df_weather_daily <- df_weather_main %>% group_by(Date) %>% dplyr::summarise(Wind_Direction = mean(Wind_Direction),Wind_Speed =
+                                                                       mean(Wind_Speed),Temperature1 = mean(Temperature1),
+                                                                     Pressure1 = mean(Pressure1), Humidity1=mean(Humidity1))
+```
+
+Combining comed and weather data
+```{r}
+df_main <- full_join(comed_daily,df_weather_daily,by="Date")
+
+#Checking for duplicates
+n_occur <- data.frame(table(df_main$Date))
+n_occur[n_occur$Freq > 1,]
+
+#Removing leap year date
+which(df_main$Date == "2016/02/29")
+df_main = df_main[-c(1155),]
+```
+
+#Daily Data Modeling 
+
+#Creating train and test data sets for daily data
+```{r}
+df_main_train<-df_main[1:1338,]
+df_main_test<-df_main[1339:1460,]
+msts_power <- msts(df_main_train$day_comsump, seasonal.periods = c(7,365), start = c(2013,01,01))
+
+```
+
+#Exploratory analysis of Daily data
+```{r}
+autoplot(msts_power)
+
+df_main_train %>%
+  as.data.frame() %>%
+  ggplot(aes(x=Temperature1, y=day_comsump)) + geom_point() +
+  xlab("Temperature (Kelvin)") +
+  ylab("Consumption (MW)")
+
+ts_temp<-ts(df_main_train$Temperature1,freq=365)
+adf.test(ts_temp)
+kpss.test(ts_temp)
+
+ts_pres<-ts(df_main_train$Pressure1,freq=365)
+adf.test(ts_pres)
+kpss.test(ts_pres)
+
+ts_wind_speed<-ts(df_main_train$Wind_Speed,freq=365)
+adf.test(ts_wind_speed)
+kpss.test(ts_wind_speed)
+
+```
+
+
+```{r}
+#Base Model Snaive
+forecast.snaive = snaive(msts_power, h = 122)
+autoplot(forecast.snaive)+geom_line(color = "#00AFBB", size = 0.5) + ggtitle('COMED Power - Consumption')+xlab('Date') + ylab('Consumption in MW')
+checkresiduals(forecast.snaive)
+accuracy(forecast.snaive,df_main_test$day_comsump)
+snaive_daily_point<-summary(forecast.snaive)[,1]
+snaive.smape.daily <- sMAPE(actual = df_main_test$day_comsump,
+                        prediction = snaive_daily_point)
+snaive.smape.daily
+```
+
+```{r}
+#TBATS MODEL
+tbats_power <- tbats(msts_power) 
+f_tbats <- forecast(tbats_power, h = 122)
+autoplot(f_tbats) +ggtitle('Comed Power - Forecast')+ xlab('Date') + ylab('Consumption in MW')
+checkresiduals(f_tbats)
+accuracy(f_tbats,df_main_test$day_comsump)
+tbats_daily_point<-summary(f_tbats)[,1]
+tbats.smape.daily <- sMAPE(actual = df_main_test$day_comsump,
+                        prediction = tbats_daily_point)
+tbats.smape.daily
+```
+
+```{r}
+#MSTL MODEL
+mstl_power <- mstl(msts_power)
+autoplot(mstl_power) +geom_line(color = "#00AFBB") + ggtitle('COMED Power - Consumption')
+f_mstl <- stlf(msts_power, h = 122)
+autoplot(f_mstl) +geom_line(color = "#00AFBB") + ggtitle('Comed Power - Consumption')+ xlab('Date') + ylab('Consumption in MW')
+checkresiduals(f_mstl)
+accuracy(f_mstl,df_main_test$day_comsump) 
+mstl_daily_point<-summary(f_mstl)[,1]
+mstl.smape.daily <- sMAPE(actual = df_main_test$day_comsump,
+                        prediction = mstl_daily_point)
+mstl.smape.daily
+
+```
+
+```{r}
+#COVARIATE
+#temp_power_train$hour_of_day <- strftime(temp_power_train$Datetime,'%H')
+temp_power_train<-df_main_train[,c("Date","Temperature1","day_comsump")]
+temp_power_test<-df_main_test[,c("Date","Temperature1","day_comsump")]
+temp_power_train$day_of_week <- strftime(temp_power_train$Date,'%u')
+#temp_power_test$hour_of_day <- strftime(temp_power_test$Datetime,'%H')
+temp_power_test$day_of_week <- strftime(temp_power_test$Date, '%u')
+library(segmented)
+fit_reg <- segmented(lm(day_comsump~Temperature1+day_of_week,temp_power_train),seg.Z=~Temperature1)
+summary(fit_reg)
+plot(fit_reg)
+predicted_MW <- predict(fit_reg,temp_power_test)
+
+fitted<-ts(predicted_MW)
+autoplot(fitted)
+autoplot(fitted) +geom_line(color = "#00AFBB") + ggtitle('Comed Power - Consumption')+ xlab('Date') + ylab('Consumption in MW')
+
+acf(fit_reg$residuals)
+
+rmse <- function(actual, predicted){sqrt(mean((actual - predicted)^2))} 
+mae <- function(actual,predicted)
+{error <- actual - predicted 
+mean(abs(error))}
+sprintf('The RMSE for the model is: %f',rmse(predicted_MW, temp_power_test$day_comsump))
+sprintf('The MAE for the model is: %f',mae(predicted_MW, temp_power_test$day_comsump))  
+
+cov_daily_point<-fit_reg$fitted.values
+cov_daily_point.1<-as.vector(cov_daily_point)
+cov.smape.daily <- sMAPE(actual = temp_power_train$day_comsump,
+                        prediction = cov_daily_point.1)
+cov.smape.daily
+                            
+```
+```{r}
+
+```
+
+Arima with seasonality
+
+```{r}
+
+sarima_daily<-auto.arima(msts_power,seasonal=TRUE, max.p = 6,                        max.q = 6, d =1, max.P = 6, max.Q = 6, D =1, ic = "aicc")
+summary(sarima_daily)
+sarima_daily_f<-forecast(sarima_daily,h=122)
+
+autoplot(sarima_daily_f) +geom_line(color = "#00AFBB") + ggtitle('Comed Power - Consumption')+ xlab('Date') + ylab('Consumption in MW')
+checkresiduals(sarima_daily_f)
+accuracy(sarima_daily_f,df_main_test$day_comsump) 
+mstl_daily_point<-summary(f_mstl)[,1]
+mstl.smape.daily <- sMAPE(actual = df_main_test$day_comsump,
+                        prediction = mstl_daily_point)
+mstl.smape.daily
+```
+
+Arima with xreg
+```{r}
+acf(msts_power)
+pacf(msts_power)
+daily_xreg<- auto.arima(msts_power,seasonal=TRUE, max.p = 4,                        max.q = 4, d =1, max.P = 4, max.Q = 4, D =1, ic = "aicc",xreg = df_main_train$Temperature1)
+daily_xreg_forecast<-forecast(daily_xreg,h=122,xreg = df_main_train$Temperature1)
+
+autoplot(daily_xreg_forecast) +geom_line(color = "#00AFBB") + ggtitle('Comed Power - Consumption')+ xlab('Date') + ylab('Consumption in MW')
+checkresiduals(daily_xreg_forecast)
+accuracy(daily_xreg_forecast,df_main_test$day_comsump) 
+mstl_daily_point<-summary(f_mstl)[,1]
+mstl.smape.daily <- sMAPE(actual = df_main_test$day_comsump,
+                        prediction = mstl_daily_point)
+mstl.smape.daily
+```
+
+
+
+
+Modeling weekly data
+
+#Creating train and test Data sets
+```{r}
+Weekly_df <- read.csv('/Users/neerajtadur/Downloads/data_weekly.csv', header=TRUE)
+week_train<-Weekly_df[1:192,]
+week_test<-Weekly_df[193:210,]
+msts_comed_power <- msts(week_train$consump, seasonal.periods = c(4,48), start = c(2013,01,01))
+autoplot(msts_comed_power)
+
+```
+
+Model selection
+```{r}
+#Base Model Snaive
+forecast.week.snaive = snaive(msts_comed_power, h = 18)
+autoplot(forecast.week.snaive)+geom_line(color = "#00AFBB", size = 0.5) + ggtitle('COMED Power - Consumption')+xlab('Date') + ylab('Consumption in MW')
+checkresiduals(forecast.week.snaive)
+week_base_score<-accuracy(forecast.week.snaive,week_test$consump)
+
+snaive_week_point<-summary(forecast.week.snaive)[,1]
+snaive.smape.week <- sMAPE(actual = week_test$consump,
+                        prediction = snaive_week_point)
+snaive.smape.week
+
+```
+
+```{r}
+#TBATS MODEL
+tbats_week <- tbats(msts_comed_power) 
+f_tbats_week <- forecast(tbats_week, h = 18)
+autoplot(f_tbats_week) +ggtitle('Comed Power - Forecast')+ xlab('Date') + ylab('Consumption in MW')
+acf(f_tbats_week$residuals)
+checkresiduals(f_tbats_week)
+tbats_week_score<-accuracy(f_tbats_week,week_test$consump)
+
+tbats_week_point<-summary(f_tbats_week)[,1]
+tbats.smape.week <- sMAPE(actual = week_test$consump,
+                        prediction = tbats_week_point)
+tbats.smape.week
+```
+
+```{r}
+#MSTL MODEL
+mstl_week <- mstl(msts_comed_power)
+autoplot(mstl_week) +geom_line(color = "#00AFBB") + ggtitle('COMED Power - Consumption')
+f_mstl_week <- stlf(msts_comed_power, h = 18)
+autoplot(f_mstl_week) +geom_line(color = "#00AFBB") + ggtitle('Comed Power - Consumption, 2012-16')+ xlab('Date') + ylab('Consumption in MW')
+accuracy(f_mstl_week,week_test$consump) 
+
+checkresiduals(f_mstl_week)
+mstl_week_point<-summary(f_mstl_week)[,1]
+mstl.smape.week <- sMAPE(actual = week_test$consump,
+                        prediction = mstl_week_point)
+mstl.smape.week
+```
+
+
+
+
+
